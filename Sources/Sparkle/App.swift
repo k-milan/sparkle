@@ -469,12 +469,16 @@ final class ChatGPTIntegration: AssistantIntegration, @unchecked Sendable {
                   let payload = object["payload"] as? [String: Any],
                   let payloadType = payload["type"] as? String else { continue }
 
-            if recordType == "response_item",
-               payloadType == "message",
-               payload["role"] as? String == "assistant",
-               payload["phase"] as? String == "final_answer" {
-                debugLog("saw final_answer in \(url.lastPathComponent)")
-                emit(.completed(provider: provider, title: taskTitle(for: url)))
+            if recordType == "event_msg", payloadType == "task_complete" {
+                // Internal classifiers and helper sessions can also write
+                // final_answer records. A real desktop task ends with
+                // task_complete and has an entry in the local thread catalog.
+                guard let title = taskTitle(for: url) else {
+                    debugLog("ignored untitled internal task completion in \(url.lastPathComponent)")
+                    continue
+                }
+                debugLog("saw titled task_complete in \(url.lastPathComponent)")
+                emit(.completed(provider: provider, title: title))
             } else if recordType == "response_item",
                       payloadType == "custom_tool_call",
                       payload["name"] as? String == "request_user_input" {

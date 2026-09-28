@@ -18,11 +18,12 @@ struct SparkleApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
-    private let monitor = ChatGPTMonitor()
+    private lazy var integrations: [AssistantIntegration] = [ChatGPTIntegration(), ClaudeIntegration()]
     private let defaults = UserDefaults.standard
     private var stateItem: NSMenuItem!
     private var notificationsItem: NSMenuItem!
     private var soundItem: NSMenuItem!
+    private var pendingProvider: AssistantProvider?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureDefaults()
@@ -35,10 +36,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             object: nil
         )
 
-        monitor.onStateChange = { [weak self] state in
-            Task { @MainActor in self?.handle(state) }
+        for integration in integrations {
+            integration.onEvent = { [weak self] event in
+                Task { @MainActor in self?.handle(event) }
+            }
+            integration.start()
         }
-        monitor.start()
     }
 
     private func configureDefaults() {
@@ -61,11 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func configureMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = MascotIcon.image(for: .idle)
-        statusItem.button?.toolTip = "Sparkle — watching ChatGPT"
+        statusItem.button?.toolTip = "Sparkle — watching ChatGPT and Claude"
 
         let menu = NSMenu()
         menu.delegate = self
-        stateItem = NSMenuItem(title: "Watching for ChatGPT", action: nil, keyEquivalent: "")
+        stateItem = NSMenuItem(title: "Watching ChatGPT and Claude", action: nil, keyEquivalent: "")
         stateItem.isEnabled = false
         menu.addItem(stateItem)
         menu.addItem(.separator())
@@ -97,36 +100,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         open.target = self
         menu.addItem(open)
 
+        let openClaude = NSMenuItem(title: "Open Claude", action: #selector(openClaude), keyEquivalent: "")
+        openClaude.target = self
+        menu.addItem(openClaude)
+
         let quit = NSMenuItem(title: "Quit Sparkle", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
     }
 
-    private func handle(_ state: ChatState) {
-        statusItem.button?.image = MascotIcon.image(for: state)
-        statusItem.button?.toolTip = state.tooltip
-        stateItem.title = state.menuTitle
+    private func handle(_ event: IntegrationEvent) {
+        let state: ChatState
+        let provider: AssistantProvider
+        let notificationTitle: String
+        let notificationBody: String
 
-        switch state {
-        case .needsAttention(let reason, let taskTitle):
-            let body = taskTitle.map { "“\($0)” needs your attention. \(reason)" } ?? reason
-            sendNotification(title: "ChatGPT needs you", body: body)
-        case .completed(let taskTitle):
-            let body = taskTitle.map { "“\($0)” is ready." } ?? "Your response is ready."
-            sendNotification(title: "ChatGPT replied", body: body)
-        case .idle, .working, .notRunning, .accessibilityNeeded:
-            break
+        switch event {
+        case .needsAttention(let eventProvider, let taskTitle, let reason):
+            provider = eventProvider
+            state = .needsAttention(reason, taskTitle)
+            notificationTitle = "\(provider.rawValue) needs you"
+            notificationBody = taskTitle.map { "“\($0)” needs your attention. \(reason)" } ?? reason
+        case .completed(let eventProvider, let taskTitle):
+            provider = eventProvider
+            state = .completed(taskTitle)
+            notificationTitle = "\(provider.rawValue) replied"
+            notificationBody = taskTitle.map { "“\($0)” is ready." } ?? "Your response is ready."
         }
+
+        pendingProvider = provider
+        statusItem.button?.image = MascotIcon.image(for: state)
+        statusItem.button?.toolTip = "Sparkle — \(provider.rawValue) needs attention"
+        stateItem.title = "\(provider.rawValue) needs attention"
+        sendNotification(title: notificationTitle, body: notificationBody, provider: provider)
     }
 
-    private func sendNotification(title: String, body: String) {
+    private func sendNotification(title: String, body: String, provider: AssistantProvider? = nil) {
         guard defaults.bool(forKey: "notificationsEnabled") else { return }
         playAlertSound()
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.categoryIdentifier = "CHATGPT_ATTENTION"
+        content.categoryIdentifier = "ASSISTANT_ATTENTION"
+        if let provider { content.userInfo = ["provider": provider.rawValue] }
         // Sparkle plays the sound itself. This remains audible when macOS is
         // configured to show notification banners silently and avoids two sounds.
         content.sound = nil
@@ -157,18 +174,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        Task { @MainActor in self.openChatGPT() }
+        let providerName = response.notification.request.content.userInfo["provider"] as? String
+        Task { @MainActor in
+            providerName == AssistantProvider.claude.rawValue ? self.openClaude() : self.openChatGPT()
+        }
         completionHandler()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        monitor.acknowledge()
+        acknowledge()
     }
 
     @objc private func workspaceAppActivated(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.bundleIdentifier == "com.openai.codex" else { return }
-        monitor.acknowledge()
+              integrations.contains(where: { $0.bundleIdentifier == app.bundleIdentifier }) else { return }
+        acknowledge()
     }
 
     @objc private func toggleNotifications() {
@@ -198,9 +218,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @objc private func playTestSound() { playAlertSound() }
 
     @objc private func openChatGPT() {
-        monitor.acknowledge()
+        acknowledge()
         let configuration = NSWorkspace.OpenConfiguration()
         NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/ChatGPT.app"), configuration: configuration)
+    }
+
+    @objc private func openClaude() {
+        acknowledge()
+        let configuration = NSWorkspace.OpenConfiguration()
+        NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/Claude.app"), configuration: configuration)
+    }
+
+    private func acknowledge() {
+        pendingProvider = nil
+        statusItem.button?.image = MascotIcon.image(for: .idle)
+        statusItem.button?.toolTip = "Sparkle — watching ChatGPT and Claude"
+        stateItem.title = "Watching ChatGPT and Claude"
     }
 
     @objc private func quit() { NSApplication.shared.terminate(nil) }
@@ -228,13 +261,14 @@ enum ChatState: Equatable {
     var tooltip: String { "Sparkle — \(menuTitle)" }
 }
 
-final class ChatGPTMonitor: @unchecked Sendable {
-    var onStateChange: ((ChatState) -> Void)?
+final class ChatGPTIntegration: AssistantIntegration, @unchecked Sendable {
+    let provider = AssistantProvider.chatGPT
+    let bundleIdentifier = "com.openai.codex"
+    var onEvent: (@Sendable (IntegrationEvent) -> Void)?
 
     private let queue = DispatchQueue(label: "app.sparkle.monitor", qos: .utility)
     private var fileSources: [URL: DispatchSourceFileSystemObject] = [:]
     private var directorySources: [URL: DispatchSourceFileSystemObject] = [:]
-    private var lastState: ChatState = .notRunning
     private var sessionOffsets: [URL: UInt64] = [:]
     private var sessionRemainders: [URL: Data] = [:]
 
@@ -244,14 +278,17 @@ final class ChatGPTMonitor: @unchecked Sendable {
         discoverSessionFiles(initial: true)
     }
 
-    func acknowledge() {
-        queue.async { [weak self] in self?.publish(.idle, force: true) }
+    func stop() {
+        queue.async { [weak self] in
+            self?.fileSources.values.forEach { $0.cancel() }
+            self?.directorySources.values.forEach { $0.cancel() }
+            self?.fileSources.removeAll()
+            self?.directorySources.removeAll()
+        }
     }
 
-    private func publish(_ state: ChatState, force: Bool = false) {
-        guard force || state != lastState else { return }
-        lastState = state
-        DispatchQueue.main.async { [weak self] in self?.onStateChange?(state) }
+    private func emit(_ event: IntegrationEvent) {
+        onEvent?(event)
     }
 
     private func raiseFileDescriptorLimit() {
@@ -389,21 +426,23 @@ final class ChatGPTMonitor: @unchecked Sendable {
                payload["role"] as? String == "assistant",
                payload["phase"] as? String == "final_answer" {
                 debugLog("saw final_answer in \(url.lastPathComponent)")
-                publish(.completed(taskTitle(for: url)), force: true)
+                emit(.completed(provider: provider, title: taskTitle(for: url)))
             } else if recordType == "response_item",
                       payloadType == "custom_tool_call",
                       payload["name"] as? String == "request_user_input" {
-                publish(.needsAttention(
-                    "An approval, question, or action is waiting.",
-                    taskTitle(for: url)
-                ), force: true)
+                emit(.needsAttention(
+                    provider: provider,
+                    title: taskTitle(for: url),
+                    reason: "An approval, question, or action is waiting."
+                ))
             } else if recordType == "event_msg",
                       (payloadType.lowercased().contains("approval") ||
                        payloadType.lowercased().contains("elicitation")) {
-                publish(.needsAttention(
-                    "An approval, question, or action is waiting.",
-                    taskTitle(for: url)
-                ), force: true)
+                emit(.needsAttention(
+                    provider: provider,
+                    title: taskTitle(for: url),
+                    reason: "An approval, question, or action is waiting."
+                ))
             }
         }
     }

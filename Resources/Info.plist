@@ -6,6 +6,8 @@
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>Sparkle</string>
+    <key>CFBundleIconFile</key>
+    <string>SparkleIcon.png</string>
     <key>CFBundleIdentifier</key>
     <string>app.sparkle.companion</string>
     <key>CFBundleInfoDictionaryVersion</key>

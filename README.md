@@ -10,6 +10,8 @@ ready or a task needs attention.
 - Task titles in notifications
 - Direct notification sound
 - Pink tray state while something is waiting; white when acknowledged
+- Sparkle mascot poses for idle, replied, attention, and offline states
+- Sparkle app artwork on macOS notifications
 - Automatically acknowledges alerts when ChatGPT or Claude is activated
 - Kernel file notifications with effectively zero idle CPU polling
 - No network requests and no API key

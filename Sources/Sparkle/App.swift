@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var stateItem: NSMenuItem!
     private var notificationsItem: NSMenuItem!
     private var soundItem: NSMenuItem!
+    private var mascotImageView: NSImageView!
     private var pendingProvider: AssistantProvider?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,6 +36,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceRunningAppsChanged),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceRunningAppsChanged),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
 
         for integration in integrations {
             integration.onEvent = { [weak self] event in
@@ -42,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             integration.start()
         }
+        refreshRunningState()
     }
 
     private func configureDefaults() {
@@ -68,6 +82,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         let menu = NSMenu()
         menu.delegate = self
+
+        let mascotItem = NSMenuItem()
+        let mascotContainer = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 112))
+        mascotImageView = NSImageView(frame: NSRect(x: 62, y: 4, width: 96, height: 104))
+        mascotImageView.imageScaling = .scaleProportionallyUpOrDown
+        mascotImageView.image = MascotArtwork.image(for: .idle)
+        mascotContainer.addSubview(mascotImageView)
+        mascotItem.view = mascotContainer
+        menu.addItem(mascotItem)
+
         stateItem = NSMenuItem(title: "Watching ChatGPT and Claude", action: nil, keyEquivalent: "")
         stateItem.isEnabled = false
         menu.addItem(stateItem)
@@ -130,6 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         pendingProvider = provider
+        mascotImageView.image = MascotArtwork.image(for: state)
         statusItem.button?.image = MascotIcon.image(for: state)
         statusItem.button?.toolTip = "Sparkle — \(provider.rawValue) needs attention"
         stateItem.title = "\(provider.rawValue) needs attention"
@@ -191,6 +216,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         acknowledge()
     }
 
+    @objc private func workspaceRunningAppsChanged(_ notification: Notification) {
+        refreshRunningState()
+    }
+
     @objc private func toggleNotifications() {
         let enabled = !defaults.bool(forKey: "notificationsEnabled")
         defaults.set(enabled, forKey: "notificationsEnabled")
@@ -234,6 +263,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         statusItem.button?.image = MascotIcon.image(for: .idle)
         statusItem.button?.toolTip = "Sparkle — watching ChatGPT and Claude"
         stateItem.title = "Watching ChatGPT and Claude"
+    }
+
+    private func refreshRunningState() {
+        let watchedBundleIDs = Set(integrations.map(\.bundleIdentifier))
+        let anyAssistantIsRunning = NSWorkspace.shared.runningApplications.contains {
+            guard let bundleIdentifier = $0.bundleIdentifier else { return false }
+            return watchedBundleIDs.contains(bundleIdentifier)
+        }
+        guard pendingProvider == nil else { return }
+
+        let state: ChatState = anyAssistantIsRunning ? .idle : .notRunning
+        mascotImageView.image = MascotArtwork.image(for: state)
+        statusItem.button?.image = MascotIcon.image(for: state)
+        statusItem.button?.toolTip = anyAssistantIsRunning
+            ? "Sparkle — watching ChatGPT and Claude"
+            : "Sparkle — ChatGPT and Claude aren’t running"
+        stateItem.title = anyAssistantIsRunning
+            ? "Watching ChatGPT and Claude"
+            : "ChatGPT and Claude aren’t running"
     }
 
     @objc private func quit() { NSApplication.shared.terminate(nil) }
@@ -576,5 +624,21 @@ enum MascotIcon {
         }
         image.isTemplate = false
         return image
+    }
+}
+
+enum MascotArtwork {
+    static func image(for state: ChatState) -> NSImage? {
+        let filename: String = switch state {
+        case .needsAttention: "sparkle-attention"
+        case .completed: "sparkle-replied"
+        case .notRunning: "sparkle-offline"
+        case .idle, .working, .accessibilityNeeded: "sparkle-idle"
+        }
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        return NSImage(contentsOf: resources
+            .appendingPathComponent("Mascot", isDirectory: true)
+            .appendingPathComponent(filename)
+            .appendingPathExtension("png"))
     }
 }

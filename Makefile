@@ -14,7 +14,7 @@ bundle: build
 	mkdir -p "$(APP_DIR)/Contents/Resources"
 	cp "$(BUILD_DIR)/$(APP_NAME)" "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"
 	cp Resources/Info.plist "$(APP_DIR)/Contents/Info.plist"
-	cp Resources/SparkleIcon.png "$(APP_DIR)/Contents/Resources/SparkleIcon.png"
+	cp Resources/Sparkle.icns "$(APP_DIR)/Contents/Resources/Sparkle.icns"
 	cp -R Resources/Mascot "$(APP_DIR)/Contents/Resources/Mascot"
 	codesign --force --deep --sign - "$(APP_DIR)"
 
